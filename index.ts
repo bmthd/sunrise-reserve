@@ -20,6 +20,43 @@ function getNextShutdownTime(): Date {
   return shutdown;
 }
 
+function isMaintenanceTime(): boolean {
+  const now = new Date();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+
+  // 23:50～翌0:05はメンテナンス時間
+  if (hours === 23 && minutes >= 50) {
+    return true;
+  }
+  if (hours === 0 && minutes <= 5) {
+    return true;
+  }
+
+  return false;
+}
+
+function getNextMaintenanceEnd(): Date | null {
+  const now = new Date();
+  const hours = now.getHours();
+  const minutes = now.getMinutes();
+
+  // メンテナンス時間中の場合、次の0:05を返す
+  if (hours === 23 && minutes >= 50) {
+    const end = new Date(now);
+    end.setHours(0, 5, 0, 0);
+    end.setDate(end.getDate() + 1);
+    return end;
+  }
+  if (hours === 0 && minutes <= 5) {
+    const end = new Date(now);
+    end.setHours(0, 5, 0, 0);
+    return end;
+  }
+
+  return null;
+}
+
 async function startMonitoring(options: { interval?: number } = {}): Promise<void> {
   console.log('='.repeat(50));
   console.log('サンライズ瀬戸・出雲 空席監視システム');
@@ -51,25 +88,37 @@ async function startMonitoring(options: { interval?: number } = {}): Promise<voi
   console.log('終了するには Ctrl+C を押してください。\n');
 
   let foundCount = 0;
+  let maintenanceTimer: NodeJS.Timeout | null = null;
 
   // 自動終了タイマー
   const timeUntilShutdown = shutdownTime.getTime() - Date.now();
   const shutdownTimer = setTimeout(async () => {
     console.log('\n\n自動終了時刻になりました。');
     clearInterval(intervalId);
+    if (maintenanceTimer) clearTimeout(maintenanceTimer);
     await notifyShutdown(notificationConfig, foundCount);
     process.exit(0);
   }, timeUntilShutdown);
 
-  // 初回チェック
-  const initialResult = await checkAvailability(settings);
-  if (initialResult.hasAvailability) {
-    foundCount++;
-    await notifyAvailability(initialResult.availableRooms, notificationConfig);
-  }
+  // チェック実行関数
+  const performCheck = async () => {
+    // メンテナンス時間かチェック
+    if (isMaintenanceTime()) {
+      const maintenanceEnd = getNextMaintenanceEnd();
+      if (maintenanceEnd) {
+        const waitTime = maintenanceEnd.getTime() - Date.now();
+        console.log(`\nメンテナンス時間中です (23:50～0:05)`);
+        console.log(`再開時刻: ${maintenanceEnd.toLocaleTimeString('ja-JP')}`);
 
-  // 指定間隔でチェック
-  const intervalId = setInterval(async () => {
+        maintenanceTimer = setTimeout(() => {
+          console.log('\nメンテナンス終了。監視を再開します。');
+          maintenanceTimer = null;
+        }, waitTime);
+
+        return;
+      }
+    }
+
     const result = await checkAvailability(settings);
     if (result.hasAvailability) {
       foundCount++;
@@ -77,13 +126,28 @@ async function startMonitoring(options: { interval?: number } = {}): Promise<voi
       console.log('\n空席が見つかったため、監視を継続します。');
       console.log('予約する場合は Ctrl+C で終了してください。\n');
     }
-  }, interval);
+  };
+
+  // 初回チェック
+  if (!isMaintenanceTime()) {
+    await performCheck();
+  } else {
+    console.log('\n現在メンテナンス時間中です (23:50～0:05)。メンテナンス終了後に監視を開始します。');
+    const maintenanceEnd = getNextMaintenanceEnd();
+    if (maintenanceEnd) {
+      console.log(`再開時刻: ${maintenanceEnd.toLocaleTimeString('ja-JP')}\n`);
+    }
+  }
+
+  // 指定間隔でチェック
+  const intervalId = setInterval(performCheck, interval);
 
   // Ctrl+C でクリーンアップ
   process.on('SIGINT', async () => {
     console.log('\n\n監視を終了します。');
     clearInterval(intervalId);
     clearTimeout(shutdownTimer);
+    if (maintenanceTimer) clearTimeout(maintenanceTimer);
     await notifyShutdown(notificationConfig, foundCount);
     process.exit(0);
   });
