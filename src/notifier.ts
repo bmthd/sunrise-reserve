@@ -96,3 +96,44 @@ export async function notifyAvailability(
     await notifyWithSound(message);
   }
 }
+
+export async function notifyShutdown(
+  config: NotificationConfig,
+  foundCount: number
+): Promise<void> {
+  const message = foundCount > 0
+    ? `監視を終了しました。\n空席発見回数: ${foundCount}回`
+    : '監視を終了しました。\n空席は見つかりませんでした。';
+
+  if (config.type === 'discord' && config.discordWebhookUrl) {
+    try {
+      const response = await fetch(config.discordWebhookUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          embeds: [{
+            title: '🛑 監視終了',
+            description: message,
+            color: foundCount > 0 ? 0x0099ff : 0x999999,
+            timestamp: new Date().toISOString()
+          }]
+        })
+      });
+
+      if (!response.ok) {
+        console.error('Discord Webhook送信に失敗しました:', response.statusText);
+      }
+    } catch (error) {
+      console.error('Discord Webhook送信エラー:', (error as Error).message);
+    }
+  } else {
+    notifier.notify({
+      title: 'サンライズ監視終了',
+      message,
+      sound: false,
+      wait: false
+    });
+  }
+}

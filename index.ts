@@ -2,8 +2,23 @@ import { Command } from 'commander';
 import { checkAvailability } from './src/availability.js';
 import { loadSettings } from './src/settings.js';
 import { getFormData, showConfig } from './src/cli.js';
-import { notifyAvailability, testDiscordWebhook } from './src/notifier.js';
+import { notifyAvailability, testDiscordWebhook, notifyShutdown } from './src/notifier.js';
 import { CHECK_INTERVAL } from './src/constants.js';
+
+function getNextShutdownTime(): Date {
+  const now = new Date();
+  const shutdown = new Date();
+
+  // 日本時間1:50に設定
+  shutdown.setHours(1, 50, 0, 0);
+
+  // 現在時刻が1:50を過ぎていたら翌日の1:50に設定
+  if (now >= shutdown) {
+    shutdown.setDate(shutdown.getDate() + 1);
+  }
+
+  return shutdown;
+}
 
 async function startMonitoring(options: { interval?: number } = {}): Promise<void> {
   console.log('='.repeat(50));
@@ -30,12 +45,26 @@ async function startMonitoring(options: { interval?: number } = {}): Promise<voi
     }
   }
 
+  const shutdownTime = getNextShutdownTime();
   console.log(`\n監視を開始します。${interval / 1000}秒ごとにチェックします。`);
+  console.log(`自動終了時刻: ${shutdownTime.toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' })}`);
   console.log('終了するには Ctrl+C を押してください。\n');
+
+  let foundCount = 0;
+
+  // 自動終了タイマー
+  const timeUntilShutdown = shutdownTime.getTime() - Date.now();
+  const shutdownTimer = setTimeout(async () => {
+    console.log('\n\n自動終了時刻になりました。');
+    clearInterval(intervalId);
+    await notifyShutdown(notificationConfig, foundCount);
+    process.exit(0);
+  }, timeUntilShutdown);
 
   // 初回チェック
   const initialResult = await checkAvailability(settings);
   if (initialResult.hasAvailability) {
+    foundCount++;
     await notifyAvailability(initialResult.availableRooms, notificationConfig);
   }
 
@@ -43,6 +72,7 @@ async function startMonitoring(options: { interval?: number } = {}): Promise<voi
   const intervalId = setInterval(async () => {
     const result = await checkAvailability(settings);
     if (result.hasAvailability) {
+      foundCount++;
       await notifyAvailability(result.availableRooms, notificationConfig);
       console.log('\n空席が見つかったため、監視を継続します。');
       console.log('予約する場合は Ctrl+C で終了してください。\n');
@@ -50,9 +80,11 @@ async function startMonitoring(options: { interval?: number } = {}): Promise<voi
   }, interval);
 
   // Ctrl+C でクリーンアップ
-  process.on('SIGINT', () => {
+  process.on('SIGINT', async () => {
     console.log('\n\n監視を終了します。');
     clearInterval(intervalId);
+    clearTimeout(shutdownTimer);
+    await notifyShutdown(notificationConfig, foundCount);
     process.exit(0);
   });
 }
