@@ -3,6 +3,8 @@ import type { Settings } from './availability.js';
 import { TRAINS, ROOM_TYPES, DEPARTURE_STATIONS, ARRIVAL_STATIONS } from './constants.js';
 import { loadSettings, saveSettings } from './settings.js';
 
+type SelectOption = string | { name: string; value: string };
+
 function createInterface(): readline.Interface {
   return readline.createInterface({
     input: process.stdin,
@@ -14,16 +16,15 @@ function question(rl: readline.Interface, query: string): Promise<string> {
   return new Promise(resolve => rl.question(query, resolve));
 }
 
-async function selectFromList<T>(
+async function selectFromList(
   rl: readline.Interface,
-  items: T[],
-  prompt: string,
-  valueKey?: keyof T
+  items: SelectOption[],
+  prompt: string
 ): Promise<string> {
   console.log(`\n${prompt}`);
   items.forEach((item, index) => {
-    const displayName = typeof item === 'string' ? item : (item as any).name;
-    console.log(`${index + 1}. ${displayName}`);
+    const label = typeof item === 'string' ? item : item.name;
+    console.log(`${index + 1}. ${label}`);
   });
 
   while (true) {
@@ -31,25 +32,22 @@ async function selectFromList<T>(
     const index = parseInt(answer) - 1;
 
     if (index >= 0 && index < items.length) {
-      if (valueKey) {
-        return items[index][valueKey] as string;
-      }
-      return items[index] as string;
+      const selected = items[index];
+      return typeof selected === 'string' ? selected : selected.value;
     }
     console.log('無効な番号です。もう一度入力してください。');
   }
 }
 
-async function selectMultipleFromList<T>(
+async function selectMultipleFromList(
   rl: readline.Interface,
-  items: T[],
-  prompt: string,
-  valueKey?: keyof T
+  items: SelectOption[],
+  prompt: string
 ): Promise<string[]> {
   console.log(`\n${prompt}`);
   items.forEach((item, index) => {
-    const displayName = typeof item === 'string' ? item : (item as any).name;
-    console.log(`${index + 1}. ${displayName}`);
+    const label = typeof item === 'string' ? item : item.name;
+    console.log(`${index + 1}. ${label}`);
   });
 
   const selected: string[] = [];
@@ -78,7 +76,8 @@ async function selectMultipleFromList<T>(
         break;
       }
 
-      const value = valueKey ? (items[index][valueKey] as string) : (items[index] as string);
+      const choice = items[index];
+      const value = typeof choice === 'string' ? choice : choice.value;
       if (!selected.includes(value)) {
         selected.push(value);
       }
@@ -87,12 +86,16 @@ async function selectMultipleFromList<T>(
     if (allValid && selected.length > 0) {
       console.log('\n現在選択中:');
       selected.forEach(s => {
-        const item = items.find(i => {
-          const val = valueKey ? (i[valueKey] as string) : (i as string);
-          return val === s;
+        const item = items.find(option => {
+          if (typeof option === 'string') {
+            return option === s;
+          }
+          return option.value === s;
         });
-        const displayName = typeof item === 'string' ? item : (item as any).name;
-        console.log(`  - ${displayName}`);
+        const label = typeof item === 'string'
+          ? item
+          : item?.name ?? s;
+        console.log(`  - ${label}`);
       });
       console.log('\n追加選択するか、空Enterで確定してください。');
     }
@@ -119,7 +122,7 @@ export async function getFormData(savedSettings: Settings | null): Promise<Setti
       { name: 'Discord Webhook', value: 'discord' }
     ];
 
-    const notificationType = await selectFromList(rl, notificationTypes, '通知方法を選択してください:', 'value') as 'sound' | 'discord';
+    const notificationType = await selectFromList(rl, notificationTypes, '通知方法を選択してください:') as 'sound' | 'discord';
 
     let discordWebhookUrl: string | undefined;
     if (notificationType === 'discord') {
@@ -127,11 +130,11 @@ export async function getFormData(savedSettings: Settings | null): Promise<Setti
     }
 
     const settings: Settings = {
-      train: await selectFromList(rl, TRAINS, '列車を選択してください:', 'value'),
+      train: await selectFromList(rl, TRAINS, '列車を選択してください:'),
       departureStation: await selectFromList(rl, DEPARTURE_STATIONS, '乗車駅を選択してください:'),
       arrivalStation: await selectFromList(rl, ARRIVAL_STATIONS, '降車駅を選択してください:'),
       date: await question(rl, '\n乗車日を入力してください (例: 2025-11-15): '),
-      roomTypes: await selectMultipleFromList(rl, ROOM_TYPES, '監視する部屋タイプを選択してください:', 'value'),
+      roomTypes: await selectMultipleFromList(rl, ROOM_TYPES, '監視する部屋タイプを選択してください:'),
       notificationType,
       discordWebhookUrl
     };

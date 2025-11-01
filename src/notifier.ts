@@ -32,26 +32,16 @@ async function sendDiscordWebhook(webhookUrl: string, message: string, url?: str
   try {
     const embedDescription = url ? `${message}\n\n**予約URL:**\n${url}` : message;
 
-    const response = await fetch(webhookUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        content: url ? `@here ${message}` : message,
-        embeds: [{
-          title: '🎉 サンライズ 空席通知',
-          description: embedDescription,
-          color: 0x00ff00,
-          timestamp: new Date().toISOString(),
-          url: url || undefined
-        }]
-      })
+    await postDiscordWebhook(webhookUrl, {
+      content: url ? `@here ${message}` : message,
+      embeds: [{
+        title: '🎉 サンライズ 空席通知',
+        description: embedDescription,
+        color: 0x00ff00,
+        timestamp: new Date().toISOString(),
+        url: url || undefined
+      }]
     });
-
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
   } catch (error) {
     throw new Error(`Discord Webhook送信エラー: ${(error as Error).message}`);
   }
@@ -107,24 +97,14 @@ export async function notifyShutdown(
 
   if (config.type === 'discord' && config.discordWebhookUrl) {
     try {
-      const response = await fetch(config.discordWebhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          embeds: [{
-            title: '🛑 監視終了',
-            description: message,
-            color: foundCount > 0 ? 0x0099ff : 0x999999,
-            timestamp: new Date().toISOString()
-          }]
-        })
+      await postDiscordWebhook(config.discordWebhookUrl, {
+        embeds: [{
+          title: '🛑 監視終了',
+          description: message,
+          color: foundCount > 0 ? 0x0099ff : 0x999999,
+          timestamp: new Date().toISOString()
+        }]
       });
-
-      if (!response.ok) {
-        console.error('Discord Webhook送信に失敗しました:', response.statusText);
-      }
     } catch (error) {
       console.error('Discord Webhook送信エラー:', (error as Error).message);
     }
@@ -135,5 +115,19 @@ export async function notifyShutdown(
       sound: false,
       wait: false
     });
+  }
+}
+
+async function postDiscordWebhook(webhookUrl: string, body: Record<string, unknown>): Promise<void> {
+  const response = await fetch(webhookUrl, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body)
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   }
 }
