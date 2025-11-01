@@ -6,11 +6,11 @@ import {
   ROOM_TYPE_KEYWORDS,
   POSITIVE_KEYWORDS,
   NEGATIVE_KEYWORDS,
-  FORM_URL
+  FORM_URL,
+  determineTrainsToSearch
 } from './constants.js';
 
 export interface Settings {
-  train: string;
   departureStation: string;
   arrivalStation: string;
   date: string;
@@ -207,8 +207,11 @@ export async function checkAvailability(settings: Settings, maxRetries: number =
         .map(({ roomType }) => roomType);
 
       if (availableRooms.length > 0) {
+        const trains = determineTrainsToSearch(settings.departureStation, settings.arrivalStation);
+        const trainNames = trains.map(t => t === 'seto' ? 'サンライズ瀬戸' : 'サンライズ出雲').join('・');
+
         console.log('\n🎉 空席が見つかりました！');
-        console.log(`列車: ${settings.train}`);
+        console.log(`対象列車: ${trainNames}`);
         console.log(`区間: ${settings.departureStation} → ${settings.arrivalStation}`);
         console.log(`日付: ${settings.date}`);
         console.log('空席のある部屋:');

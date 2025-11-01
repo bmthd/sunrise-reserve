@@ -100,4 +100,43 @@ export const ARRIVAL_STATIONS: string[] = [
   '姫路', '三ノ宮', '大阪', '京都', '岡山', '高松', '出雲市'
 ];
 
+// 東京〜岡山間の共通区間の駅
+const COMMON_ROUTE_STATIONS = [
+  '東京', '横浜', '小田原', '熱海', '沼津', '富士', '静岡', '浜松',
+  '姫路', '三ノ宮', '大阪', '京都', '岡山'
+];
+
+// 瀬戸専用の駅（岡山以西）
+const SETO_ONLY_STATIONS = ['高松'];
+
+// 出雲専用の駅（岡山以西）
+const IZUMO_ONLY_STATIONS = ['出雲市'];
+
+/**
+ * 駅のペアから検索対象の列車を判定
+ * @returns 'both' | 'seto' | 'izumo'
+ */
+export function determineTrainsToSearch(departure: string, arrival: string): ('seto' | 'izumo')[] {
+  const isCommonDeparture = COMMON_ROUTE_STATIONS.includes(departure);
+  const isCommonArrival = COMMON_ROUTE_STATIONS.includes(arrival);
+
+  // 両駅が共通区間の場合は両方検索
+  if (isCommonDeparture && isCommonArrival) {
+    return ['seto', 'izumo'];
+  }
+
+  // 片方または両方が高松の場合は瀬戸のみ
+  if (departure === '高松' || arrival === '高松') {
+    return ['seto'];
+  }
+
+  // 片方または両方が出雲市の場合は出雲のみ
+  if (departure === '出雲市' || arrival === '出雲市') {
+    return ['izumo'];
+  }
+
+  // デフォルトは両方検索
+  return ['seto', 'izumo'];
+}
+
 export const FORM_URL = 'https://www.jr-odekake.net/goyoyaku/campaign/sunriseseto_izumo/form.html';

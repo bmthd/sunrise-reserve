@@ -1,6 +1,6 @@
 import * as p from '@clack/prompts';
 import type { Settings } from './availability.js';
-import { TRAINS, ROOM_TYPES, DEPARTURE_STATIONS, ARRIVAL_STATIONS } from './constants.js';
+import { ROOM_TYPES, DEPARTURE_STATIONS, ARRIVAL_STATIONS, determineTrainsToSearch } from './constants.js';
 import { loadSettings, saveSettings } from './settings.js';
 
 export async function getFormData(savedSettings: Settings | null): Promise<Settings> {
@@ -56,16 +56,6 @@ export async function getFormData(savedSettings: Settings | null): Promise<Setti
     discordWebhookUrl = webhookUrl as string;
   }
 
-  const train = await p.select({
-    message: '列車を選択してください',
-    options: TRAINS.map(t => ({ value: t.value, label: t.name }))
-  }) as string;
-
-  if (p.isCancel(train)) {
-    p.cancel('設定をキャンセルしました。');
-    process.exit(0);
-  }
-
   const departureStation = await p.select({
     message: '乗車駅を選択してください',
     options: DEPARTURE_STATIONS.map(s => ({ value: s, label: s }))
@@ -85,6 +75,11 @@ export async function getFormData(savedSettings: Settings | null): Promise<Setti
     p.cancel('設定をキャンセルしました。');
     process.exit(0);
   }
+
+  // 選択された駅から検索対象の列車を判定して表示
+  const trains = determineTrainsToSearch(departureStation, arrivalStation);
+  const trainNames = trains.map(t => t === 'seto' ? 'サンライズ瀬戸' : 'サンライズ出雲').join('・');
+  p.note(`この区間では ${trainNames} を検索します`, '検索対象列車');
 
   const date = await p.text({
     message: '乗車日を入力してください',
@@ -114,7 +109,6 @@ export async function getFormData(savedSettings: Settings | null): Promise<Setti
   }
 
   const settings: Settings = {
-    train,
     departureStation,
     arrivalStation,
     date: date as string,
