@@ -135,95 +135,116 @@ async function resolveRoomAvailabilityFromIcons(page: Page, room: RoomType): Pro
   return { status: classifyAvailabilityText(indicatorText), indicator: indicatorText };
 }
 
-export async function checkAvailability(settings: Settings): Promise<AvailabilityCheckResult> {
-  const browser: Browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext();
-  const page: Page = await context.newPage();
+export async function checkAvailability(settings: Settings, maxRetries: number = 3): Promise<AvailabilityCheckResult> {
+  let browser: Browser | null = null;
+  let lastError: Error | null = null;
 
-  try {
-    console.log(`\n[${new Date().toLocaleString('ja-JP')}] チェック中...`);
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`\n[${new Date().toLocaleString('ja-JP')}] チェック中...${attempt > 1 ? ` (再試行 ${attempt}/${maxRetries})` : ''}`);
 
-    await page.goto(FORM_URL, {
-      waitUntil: 'networkidle',
-      timeout: 30000
-    });
+      browser = await chromium.launch({ headless: true });
+      const context = await browser.newContext();
+      const page: Page = await context.newPage();
 
-    await page.waitForTimeout(2000);
+      await page.goto(FORM_URL, {
+        waitUntil: 'networkidle',
+        timeout: 30000
+      });
 
-    const availabilityHtml = await page.content();
+      await page.waitForTimeout(2000);
 
-    if (!availabilityHtml) {
-      console.log('ページの読み込みに失敗しました');
-      return { hasAvailability: false, availableRooms: [] };
-    }
+      const availabilityHtml = await page.content();
 
-    const normalizedBody = normalizeForSearch(availabilityHtml);
-
-    const roomStatuses: RoomAvailabilityResult[] = [];
-
-    for (const roomType of settings.roomTypes) {
-      const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
-      if (!roomInfo) {
-        console.warn(`未定義の部屋タイプです: ${roomType}`);
-        continue;
+      if (!availabilityHtml) {
+        throw new Error('ページの読み込みに失敗しました');
       }
 
-      const iconResult = await resolveRoomAvailabilityFromIcons(page, roomInfo);
-      let status = iconResult.status;
+      const normalizedBody = normalizeForSearch(availabilityHtml);
 
-      if (status === 'unknown') {
-        status = resolveRoomAvailability(normalizedBody, roomInfo);
-      }
+      const roomStatuses: RoomAvailabilityResult[] = [];
 
-      roomStatuses.push({
-        roomType,
-        roomInfo,
-        status,
-        indicatorText: iconResult.indicator
-      });
-    }
-
-    if (roomStatuses.length > 0) {
-      console.log('\n空席判定結果:');
-      roomStatuses.forEach(({ roomInfo, status, indicatorText }) => {
-        const statusLabel =
-          status === 'available'
-            ? '○ 空席あり'
-            : status === 'unavailable'
-              ? '× 空席なし'
-              : '- 判定不可';
-        console.log(
-          `  - ${roomInfo.name}: ${statusLabel}` +
-          (indicatorText ? ` (判定根拠: ${indicatorText})` : '')
-        );
-      });
-    }
-
-    const availableRooms = roomStatuses
-      .filter(({ status }) => status === 'available')
-      .map(({ roomType }) => roomType);
-
-    if (availableRooms.length > 0) {
-      console.log('\n🎉 空席が見つかりました！');
-      console.log(`列車: ${settings.train}`);
-      console.log(`区間: ${settings.departureStation} → ${settings.arrivalStation}`);
-      console.log(`日付: ${settings.date}`);
-      console.log('空席のある部屋:');
-      availableRooms.forEach(roomType => {
+      for (const roomType of settings.roomTypes) {
         const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
-        console.log(`  - ${roomInfo?.name}`);
-      });
+        if (!roomInfo) {
+          console.warn(`未定義の部屋タイプです: ${roomType}`);
+          continue;
+        }
 
-      return { hasAvailability: true, availableRooms };
-    } else {
-      console.log('\n空席なし');
-      return { hasAvailability: false, availableRooms: [] };
+        const iconResult = await resolveRoomAvailabilityFromIcons(page, roomInfo);
+        let status = iconResult.status;
+
+        if (status === 'unknown') {
+          status = resolveRoomAvailability(normalizedBody, roomInfo);
+        }
+
+        roomStatuses.push({
+          roomType,
+          roomInfo,
+          status,
+          indicatorText: iconResult.indicator
+        });
+      }
+
+      if (roomStatuses.length > 0) {
+        console.log('\n空席判定結果:');
+        roomStatuses.forEach(({ roomInfo, status, indicatorText }) => {
+          const statusLabel =
+            status === 'available'
+              ? '○ 空席あり'
+              : status === 'unavailable'
+                ? '× 空席なし'
+                : '- 判定不可';
+          console.log(
+            `  - ${roomInfo.name}: ${statusLabel}` +
+            (indicatorText ? ` (判定根拠: ${indicatorText})` : '')
+          );
+        });
+      }
+
+      const availableRooms = roomStatuses
+        .filter(({ status }) => status === 'available')
+        .map(({ roomType }) => roomType);
+
+      if (availableRooms.length > 0) {
+        console.log('\n🎉 空席が見つかりました！');
+        console.log(`列車: ${settings.train}`);
+        console.log(`区間: ${settings.departureStation} → ${settings.arrivalStation}`);
+        console.log(`日付: ${settings.date}`);
+        console.log('空席のある部屋:');
+        availableRooms.forEach(roomType => {
+          const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
+          console.log(`  - ${roomInfo?.name}`);
+        });
+
+        await browser.close();
+        return { hasAvailability: true, availableRooms };
+      } else {
+        console.log('\n空席なし');
+        await browser.close();
+        return { hasAvailability: false, availableRooms: [] };
+      }
+
+    } catch (error) {
+      lastError = error as Error;
+      console.error(`エラーが発生しました (試行 ${attempt}/${maxRetries}):`, lastError.message);
+
+      if (browser) {
+        try {
+          await browser.close();
+        } catch (closeError) {
+          console.error('ブラウザのクローズに失敗:', (closeError as Error).message);
+        }
+      }
+
+      if (attempt < maxRetries) {
+        console.log(`${3}秒後に再試行します...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      }
     }
-
-  } catch (error) {
-    console.error('エラーが発生しました:', (error as Error).message);
-    return { hasAvailability: false, availableRooms: [] };
-  } finally {
-    await browser.close();
   }
+
+  // すべての再試行が失敗した場合
+  console.error('すべての試行が失敗しました。最後のエラー:', lastError?.message);
+  return { hasAvailability: false, availableRooms: [] };
 }
