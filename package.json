@@ -1,0 +1,22 @@
+{
+  "name": "sunrise-reserve",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "サンライズ瀬戸・出雲の空き状況監視CLI",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts"
+  },
+  "dependencies": {
+    "commander": "^13.0.0",
+    "node-notifier": "^10.0.1",
+    "playwright": "^1.56.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.9.2",
+    "@types/node-notifier": "^8.0.5"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}
