@@ -6,7 +6,15 @@
   "main": "index.ts",
   "scripts": {
     "start": "bun run index.ts",
-    "test": "bun test"
+    "test": "bun test",
+    "build": "bun build index.ts --outdir dist --target node",
+    "typecheck": "bunx tsc --noEmit",
+    "deploy": "sudo ./deploy.sh",
+    "service:status": "sudo systemctl status sunrise-reserve",
+    "service:start": "sudo systemctl start sunrise-reserve",
+    "service:stop": "sudo systemctl stop sunrise-reserve",
+    "service:restart": "sudo systemctl restart sunrise-reserve",
+    "service:logs": "sudo journalctl -u sunrise-reserve -f"
   },
   "dependencies": {
     "@clack/prompts": "^0.11.0",
