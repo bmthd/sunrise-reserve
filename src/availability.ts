@@ -1,4 +1,4 @@
-import { chromium, type Browser, type Page } from 'playwright';
+import { chromium, type Browser, type Page, type Locator } from 'playwright';
 import type { RoomType } from './constants.js';
 import {
   ROOM_TYPES,
@@ -33,8 +33,18 @@ export interface AvailabilityCheckResult {
   availableRooms: string[];
 }
 
-const NORMALIZED_POSITIVE_KEYWORDS = POSITIVE_KEYWORDS.map(normalizeForSearch);
-const NORMALIZED_NEGATIVE_KEYWORDS = NEGATIVE_KEYWORDS.map(normalizeForSearch);
+interface KeywordEntry {
+  raw: string;
+  normalized: string;
+}
+
+interface AvailabilityResolution {
+  status: AvailabilityStatus;
+  indicator?: string;
+}
+
+const POSITIVE_KEYWORD_ENTRIES = createKeywordEntries(POSITIVE_KEYWORDS);
+const NEGATIVE_KEYWORD_ENTRIES = createKeywordEntries(NEGATIVE_KEYWORDS);
 
 function normalizeForSearch(value: string): string {
   return value
@@ -43,13 +53,64 @@ function normalizeForSearch(value: string): string {
     .replace(/[()（）・･\-~〜―‐]/g, '');
 }
 
+function createNormalizedSet(keywords: string[]): Set<string> {
+  return new Set(keywords.map(normalizeForSearch).filter(Boolean));
+}
+
+function createKeywordEntries(keywords: string[]): KeywordEntry[] {
+  return keywords
+    .map(raw => ({ raw, normalized: normalizeForSearch(raw) }))
+    .filter((entry): entry is KeywordEntry => Boolean(entry.normalized));
+}
+
+function findKeywordMatch(normalizedText: string, entries: KeywordEntry[]): KeywordEntry | null {
+  if (!normalizedText) return null;
+  for (const entry of entries) {
+    if (entry.normalized && normalizedText.includes(entry.normalized)) {
+      return entry;
+    }
+  }
+  return null;
+}
+
+function analyzeNormalizedText(normalizedText: string): { status: AvailabilityStatus; keyword?: string } {
+  if (!normalizedText) {
+    return { status: 'unknown' };
+  }
+
+  const negativeMatch = findKeywordMatch(normalizedText, NEGATIVE_KEYWORD_ENTRIES);
+  if (negativeMatch) {
+    return { status: 'unavailable', keyword: negativeMatch.raw };
+  }
+
+  const positiveMatch = findKeywordMatch(normalizedText, POSITIVE_KEYWORD_ENTRIES);
+  if (positiveMatch) {
+    return { status: 'available', keyword: positiveMatch.raw };
+  }
+
+  return { status: 'unknown' };
+}
+
+function analyzeTextForAvailability(text: string): { status: AvailabilityStatus; keyword?: string } {
+  if (!text) {
+    return { status: 'unknown' };
+  }
+
+  const normalized = normalizeForSearch(text);
+  if (!normalized) {
+    return { status: 'unknown' };
+  }
+
+  return analyzeNormalizedText(normalized);
+}
+
 function getRoomKeywordCandidates(room: RoomType): string[] {
   const aliases = ROOM_TYPE_KEYWORDS[room.value] || [];
   const unique = new Set<string>([room.name, ...aliases]);
   return Array.from(unique);
 }
 
-function resolveRoomAvailability(normalizedBody: string, room: RoomType): AvailabilityStatus {
+function resolveRoomAvailabilityFromHtml(normalizedBody: string, room: RoomType): AvailabilityResolution {
   const candidates = getRoomKeywordCandidates(room).map(normalizeForSearch);
 
   for (const keyword of candidates) {
@@ -57,82 +118,159 @@ function resolveRoomAvailability(normalizedBody: string, room: RoomType): Availa
 
     let index = normalizedBody.indexOf(keyword);
     while (index !== -1) {
-      const windowStart = Math.max(0, index - 40);
-      const windowEnd = Math.min(normalizedBody.length, index + keyword.length + 40);
+      const windowStart = Math.max(0, index - 160);
+      const windowEnd = Math.min(normalizedBody.length, index + keyword.length + 160);
       const snippet = normalizedBody.slice(windowStart, windowEnd);
+      const analysis = analyzeNormalizedText(snippet);
 
-      if (NORMALIZED_NEGATIVE_KEYWORDS.some(neg => neg && snippet.includes(neg))) {
-        return 'unavailable';
-      }
-
-      if (NORMALIZED_POSITIVE_KEYWORDS.some(pos => pos && snippet.includes(pos))) {
-        return 'available';
+      if (analysis.status !== 'unknown') {
+        return { status: analysis.status, indicator: analysis.keyword };
       }
 
       index = normalizedBody.indexOf(keyword, index + keyword.length);
     }
   }
 
-  return 'unknown';
+  return { status: 'unknown' };
 }
 
-function classifyAvailabilityText(text: string): AvailabilityStatus {
-  if (!text) return 'unknown';
-  const normalized = normalizeForSearch(text);
-  if (!normalized) return 'unknown';
+const NEGATIVE_ICON_TEXTS = createNormalizedSet(['残席なし', '空席なし', '満席']);
 
-  if (NORMALIZED_NEGATIVE_KEYWORDS.some(neg => neg && normalized.includes(neg))) {
-    return 'unavailable';
+function isNegativeIconIndicator(indicator: string): boolean {
+  const normalized = normalizeForSearch(indicator);
+  if (!normalized) return false;
+  for (const negative of NEGATIVE_ICON_TEXTS) {
+    if (normalized.includes(negative)) {
+      return true;
+    }
   }
-
-  if (NORMALIZED_POSITIVE_KEYWORDS.some(pos => pos && normalized.includes(pos))) {
-    return 'available';
-  }
-
-  return 'unknown';
+  return false;
 }
 
-async function resolveRoomAvailabilityFromIcons(page: Page, room: RoomType): Promise<{ status: AvailabilityStatus; indicator?: string }> {
+interface RowAnalysisSnapshot {
+  iconIndicators: string[];
+  attributeIndicators: string[];
+  textContent?: string;
+}
+
+export function resolveAvailabilityFromSnapshot(snapshot: RowAnalysisSnapshot): AvailabilityResolution {
+  const { iconIndicators, attributeIndicators, textContent } = snapshot;
+
+  let negativeIndicator: string | undefined;
+  for (const indicator of iconIndicators) {
+    if (isNegativeIconIndicator(indicator)) {
+      if (!negativeIndicator) {
+        negativeIndicator = indicator;
+      }
+      continue;
+    }
+
+    return { status: 'available', indicator };
+  }
+
+  if (negativeIndicator) {
+    return { status: 'unavailable', indicator: negativeIndicator };
+  }
+
+  for (const indicator of attributeIndicators) {
+    const analysis = analyzeTextForAvailability(indicator);
+    if (analysis.status !== 'unknown') {
+      return { status: analysis.status, indicator: analysis.keyword ?? indicator };
+    }
+  }
+
+  if (textContent) {
+    const analysis = analyzeTextForAvailability(textContent);
+    if (analysis.status !== 'unknown') {
+      return { status: analysis.status, indicator: analysis.keyword ?? textContent };
+    }
+  }
+
+  return { status: 'unknown' };
+}
+
+export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<AvailabilityResolution> {
+  if ((await rowLocator.count()) === 0) {
+    return { status: 'unknown' };
+  }
+
+  const row = rowLocator.first();
+
+  const iconIndicators = await row.locator('td img').evaluateAll(images =>
+    images
+      .map(image => {
+        const alt = image.getAttribute('alt')?.trim();
+        const ariaLabel = image.getAttribute('aria-label')?.trim();
+        const title = image.getAttribute('title')?.trim();
+        return alt || ariaLabel || title || '';
+      })
+      .filter((value): value is string => Boolean(value))
+  );
+
+  const attributeIndicators = await row.evaluate((node) => {
+    const texts = new Set<string>();
+    node.querySelectorAll('[alt],[aria-label],[title]').forEach(element => {
+      if (element.tagName === 'IMG') {
+        return;
+      }
+      const value =
+        element.getAttribute('alt') ||
+        element.getAttribute('aria-label') ||
+        element.getAttribute('title');
+      if (value) {
+        const trimmed = value.trim();
+        if (trimmed) {
+          texts.add(trimmed);
+        }
+      }
+    });
+    return Array.from(texts);
+  });
+
+  const rowText = (await row.innerText())?.trim();
+  return resolveAvailabilityFromSnapshot({
+    iconIndicators,
+    attributeIndicators,
+    textContent: rowText
+  });
+}
+
+async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Promise<AvailabilityResolution> {
   const formValue = ROOM_TYPE_FORM_VALUES[room.value];
-  if (!formValue) {
-    return { status: 'unknown' };
-  }
 
-  const radioLocator = page.locator(`input[type="radio"][name="facilitySelect"][value="${formValue}"]`);
-  if ((await radioLocator.count()) === 0) {
-    return { status: 'unknown' };
-  }
+  if (formValue) {
+    const radioLocator = page.locator(`input[type="radio"][name="facilitySelect"][value="${formValue}"]`);
+    if ((await radioLocator.count()) > 0) {
+      const containerLocator = radioLocator.locator('xpath=ancestor::tr[1]');
+      const iconResult = await extractAvailabilityFromRow(containerLocator);
+      if (iconResult.status !== 'unknown') {
+        return iconResult;
+      }
 
-  const containerLocator = radioLocator.locator('xpath=ancestor::tr[1]');
-  const iconCandidates = containerLocator.locator('img[alt]');
-
-  let indicatorText: string | undefined;
-
-  if ((await iconCandidates.count()) > 0) {
-    const allAlts = await iconCandidates.evaluateAll(imgs =>
-      imgs
-        .map(img => img.getAttribute('alt')?.trim() ?? '')
-        .filter(Boolean)
-    );
-
-    indicatorText = allAlts.find(alt => classifyAvailabilityText(alt) !== 'unknown');
-  }
-
-  if (!indicatorText) {
-    const fallbackIcons = radioLocator.locator('xpath=following::img[alt][1]');
-    if ((await fallbackIcons.count()) > 0) {
-      const alt = (await fallbackIcons.first().getAttribute('alt'))?.trim();
-      if (alt && classifyAvailabilityText(alt) !== 'unknown') {
-        indicatorText = alt;
+      const fallbackIcons = radioLocator.locator('xpath=following::img[alt][1]');
+      if ((await fallbackIcons.count()) > 0) {
+        const alt = (await fallbackIcons.first().getAttribute('alt'))?.trim();
+        if (alt) {
+          const analysis = analyzeTextForAvailability(alt);
+          if (analysis.status !== 'unknown') {
+            return { status: analysis.status, indicator: alt };
+          }
+        }
       }
     }
   }
 
-  if (!indicatorText) {
-    return { status: 'unknown' };
+  const candidates = getRoomKeywordCandidates(room);
+  for (const candidate of candidates) {
+    if (!candidate.trim()) continue;
+    const rowLocator = page.locator('tr', { hasText: candidate });
+    const rowResult = await extractAvailabilityFromRow(rowLocator);
+    if (rowResult.status !== 'unknown') {
+      return rowResult;
+    }
   }
 
-  return { status: classifyAvailabilityText(indicatorText), indicator: indicatorText };
+  return { status: 'unknown' };
 }
 
 export async function checkAvailability(settings: Settings, maxRetries: number = 3): Promise<AvailabilityCheckResult> {
@@ -171,18 +309,23 @@ export async function checkAvailability(settings: Settings, maxRetries: number =
           continue;
         }
 
-        const iconResult = await resolveRoomAvailabilityFromIcons(page, roomInfo);
-        let status = iconResult.status;
+        const pageResult = await resolveRoomAvailabilityFromPage(page, roomInfo);
+        let status = pageResult.status;
+        let indicatorText = pageResult.indicator;
 
         if (status === 'unknown') {
-          status = resolveRoomAvailability(normalizedBody, roomInfo);
+          const fallbackResult = resolveRoomAvailabilityFromHtml(normalizedBody, roomInfo);
+          status = fallbackResult.status;
+          if (!indicatorText && fallbackResult.indicator) {
+            indicatorText = fallbackResult.indicator;
+          }
         }
 
         roomStatuses.push({
           roomType,
           roomInfo,
           status,
-          indicatorText: iconResult.indicator
+          indicatorText
         });
       }
 
