@@ -38,7 +38,7 @@ interface KeywordEntry {
   normalized: string;
 }
 
-interface AvailabilityResolution {
+export interface AvailabilityResolution {
   status: AvailabilityStatus;
   indicator?: string;
 }
@@ -189,13 +189,30 @@ export function resolveAvailabilityFromSnapshot(snapshot: RowAnalysisSnapshot): 
   return { status: 'unknown' };
 }
 
-export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<AvailabilityResolution> {
-  if ((await rowLocator.count()) === 0) {
-    return { status: 'unknown' };
+function selectRowTexts(node: unknown): string[] {
+  const element = node as {
+    querySelectorAll: (selector: string) => Iterable<{ tagName: string; getAttribute(name: string): string | null }>;
+  };
+  const texts = new Set<string>();
+  for (const child of element.querySelectorAll('[alt],[aria-label],[title]')) {
+    if (child.tagName === 'IMG') {
+      continue;
+    }
+    const value =
+      child.getAttribute('alt') ||
+      child.getAttribute('aria-label') ||
+      child.getAttribute('title');
+    if (value) {
+      const trimmed = value.trim();
+      if (trimmed) {
+        texts.add(trimmed);
+      }
+    }
   }
+  return Array.from(texts);
+}
 
-  const row = rowLocator.first();
-
+async function analyzeAvailabilityFromRow(row: Locator): Promise<AvailabilityResolution> {
   const iconIndicators = await row.locator('td img').evaluateAll(images =>
     images
       .map(image => {
@@ -207,25 +224,7 @@ export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<A
       .filter((value): value is string => Boolean(value))
   );
 
-  const attributeIndicators = await row.evaluate((node) => {
-    const texts = new Set<string>();
-    node.querySelectorAll('[alt],[aria-label],[title]').forEach(element => {
-      if (element.tagName === 'IMG') {
-        return;
-      }
-      const value =
-        element.getAttribute('alt') ||
-        element.getAttribute('aria-label') ||
-        element.getAttribute('title');
-      if (value) {
-        const trimmed = value.trim();
-        if (trimmed) {
-          texts.add(trimmed);
-        }
-      }
-    });
-    return Array.from(texts);
-  });
+  const attributeIndicators = await row.evaluate((node) => selectRowTexts(node));
 
   const rowText = (await row.innerText())?.trim();
   return resolveAvailabilityFromSnapshot({
@@ -233,6 +232,45 @@ export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<A
     attributeIndicators,
     textContent: rowText
   });
+}
+
+export function selectBestAvailabilityResolution(resolutions: AvailabilityResolution[]): AvailabilityResolution {
+  let unavailableResolution: AvailabilityResolution | null = null;
+  let unknownResolution: AvailabilityResolution | null = null;
+
+  for (const resolution of resolutions) {
+    if (resolution.status === 'available') {
+      return resolution;
+    }
+
+    if (resolution.status === 'unavailable' && !unavailableResolution) {
+      unavailableResolution = resolution;
+      continue;
+    }
+
+    if (resolution.status === 'unknown' && !unknownResolution) {
+      unknownResolution = resolution;
+    }
+  }
+
+  return unavailableResolution ?? unknownResolution ?? { status: 'unknown' };
+}
+
+export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<AvailabilityResolution> {
+  const count = await rowLocator.count();
+  if (count === 0) {
+    return { status: 'unknown' };
+  }
+
+  const resolutions: AvailabilityResolution[] = [];
+
+  for (let index = 0; index < count; index++) {
+    const row = rowLocator.nth(index);
+    const resolution = await analyzeAvailabilityFromRow(row);
+    resolutions.push(resolution);
+  }
+
+  return selectBestAvailabilityResolution(resolutions);
 }
 
 async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Promise<AvailabilityResolution> {

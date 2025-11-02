@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'bun:test';
-import { resolveAvailabilityFromSnapshot } from '../src/availability.js';
+import {
+  resolveAvailabilityFromSnapshot,
+  selectBestAvailabilityResolution,
+  type AvailabilityResolution
+} from '../src/availability.js';
 
 describe('icon-based availability detection snapshot', () => {
   it('treats any non "残席なし" icon as available', () => {
@@ -53,5 +57,44 @@ describe('icon-based availability detection snapshot', () => {
     });
 
     expect(result.status).toBe('unknown');
+  });
+});
+
+describe('selectBestAvailabilityResolution', () => {
+  it('prefers available results even if they appear later', () => {
+    const resolutions: AvailabilityResolution[] = [
+      { status: 'unknown' },
+      { status: 'unavailable', indicator: '満席' },
+      { status: 'available', indicator: '空席あり' }
+    ];
+
+    const result = selectBestAvailabilityResolution(resolutions);
+
+    expect(result.status).toBe('available');
+    expect(result.indicator).toBe('空席あり');
+  });
+
+  it('falls back to unavailable when no availability is found', () => {
+    const resolutions: AvailabilityResolution[] = [
+      { status: 'unknown' },
+      { status: 'unavailable', indicator: '残席なし' }
+    ];
+
+    const result = selectBestAvailabilityResolution(resolutions);
+
+    expect(result.status).toBe('unavailable');
+    expect(result.indicator).toBe('残席なし');
+  });
+
+  it('returns unknown when no determinate results are present', () => {
+    const resolutions: AvailabilityResolution[] = [
+      { status: 'unknown' },
+      { status: 'unknown' }
+    ];
+
+    const result = selectBestAvailabilityResolution(resolutions);
+
+    expect(result.status).toBe('unknown');
+    expect(result.indicator).toBeUndefined();
   });
 });
