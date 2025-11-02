@@ -7,7 +7,8 @@ import {
   POSITIVE_KEYWORDS,
   NEGATIVE_KEYWORDS,
   FORM_URL,
-  determineTrainsToSearch
+  determineTrainsToSearch,
+  TRAINS
 } from './constants.js';
 
 export interface Settings {
@@ -22,6 +23,7 @@ export interface Settings {
 export type AvailabilityStatus = 'available' | 'unavailable' | 'unknown';
 
 export interface RoomAvailabilityResult {
+  train: TrainCode;
   roomType: string;
   roomInfo: RoomType;
   status: AvailabilityStatus;
@@ -42,6 +44,13 @@ interface AvailabilityResolution {
   status: AvailabilityStatus;
   indicator?: string;
 }
+
+type TrainCode = 'seto' | 'izumo';
+
+const TRAIN_NAME_MAP: Record<TrainCode, string> = {
+  seto: TRAINS.find(train => train.value === 'seto')?.name ?? 'サンライズ瀬戸',
+  izumo: TRAINS.find(train => train.value === 'izumo')?.name ?? 'サンライズ出雲'
+};
 
 const POSITIVE_KEYWORD_ENTRIES = createKeywordEntries(POSITIVE_KEYWORDS);
 const NEGATIVE_KEYWORD_ENTRIES = createKeywordEntries(NEGATIVE_KEYWORDS);
@@ -235,11 +244,16 @@ export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<A
   });
 }
 
-async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Promise<AvailabilityResolution> {
+async function resolveRoomAvailabilityFromPage(
+  page: Page,
+  room: RoomType,
+  scope?: Locator
+): Promise<AvailabilityResolution> {
   const formValue = ROOM_TYPE_FORM_VALUES[room.value];
+  const searchRoot: Locator | Page = scope ?? page;
 
   if (formValue) {
-    const radioLocator = page.locator(`input[type="radio"][name="facilitySelect"][value="${formValue}"]`);
+    const radioLocator = searchRoot.locator(`input[type="radio"][name="facilitySelect"][value="${formValue}"]`);
     if ((await radioLocator.count()) > 0) {
       const containerLocator = radioLocator.locator('xpath=ancestor::tr[1]');
       const iconResult = await extractAvailabilityFromRow(containerLocator);
@@ -263,7 +277,7 @@ async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Prom
   const candidates = getRoomKeywordCandidates(room);
   for (const candidate of candidates) {
     if (!candidate.trim()) continue;
-    const rowLocator = page.locator('tr', { hasText: candidate });
+    const rowLocator = searchRoot.locator('tr', { hasText: candidate });
     const rowResult = await extractAvailabilityFromRow(rowLocator);
     if (rowResult.status !== 'unknown') {
       return rowResult;
@@ -271,6 +285,55 @@ async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Prom
   }
 
   return { status: 'unknown' };
+}
+
+async function getTrainFormLocator(page: Page, train: TrainCode): Promise<Locator | null> {
+  const trainName = TRAIN_NAME_MAP[train];
+  const formLocator = page.locator('form', { hasText: trainName });
+  if ((await formLocator.count()) > 0) {
+    return formLocator.first();
+  }
+  return null;
+}
+
+async function collectRoomStatusesForTrain(
+  page: Page,
+  normalizedHtml: string,
+  roomTypes: string[],
+  train: TrainCode,
+  scope?: Locator
+): Promise<RoomAvailabilityResult[]> {
+  const roomStatuses: RoomAvailabilityResult[] = [];
+
+  for (const roomType of roomTypes) {
+    const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
+    if (!roomInfo) {
+      console.warn(`[${TRAIN_NAME_MAP[train]}] 未定義の部屋タイプです: ${roomType}`);
+      continue;
+    }
+
+    const pageResult = await resolveRoomAvailabilityFromPage(page, roomInfo, scope);
+    let status = pageResult.status;
+    let indicatorText = pageResult.indicator;
+
+    if (status === 'unknown') {
+      const fallbackResult = resolveRoomAvailabilityFromHtml(normalizedHtml, roomInfo);
+      status = fallbackResult.status;
+      if (!indicatorText && fallbackResult.indicator) {
+        indicatorText = fallbackResult.indicator;
+      }
+    }
+
+    roomStatuses.push({
+      train,
+      roomType,
+      roomInfo,
+      status,
+      indicatorText
+    });
+  }
+
+  return roomStatuses;
 }
 
 export async function checkAvailability(settings: Settings, maxRetries: number = 3): Promise<AvailabilityCheckResult> {
@@ -300,67 +363,78 @@ export async function checkAvailability(settings: Settings, maxRetries: number =
 
       const normalizedBody = normalizeForSearch(availabilityHtml);
 
+      const trainsToCheck = determineTrainsToSearch(
+        settings.departureStation,
+        settings.arrivalStation
+      );
       const roomStatuses: RoomAvailabilityResult[] = [];
 
-      for (const roomType of settings.roomTypes) {
-        const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
-        if (!roomInfo) {
-          console.warn(`未定義の部屋タイプです: ${roomType}`);
-          continue;
-        }
+      for (const train of trainsToCheck) {
+        let formLocator: Locator | null = null;
+        let normalizedHtmlForTrain = normalizedBody;
 
-        const pageResult = await resolveRoomAvailabilityFromPage(page, roomInfo);
-        let status = pageResult.status;
-        let indicatorText = pageResult.indicator;
-
-        if (status === 'unknown') {
-          const fallbackResult = resolveRoomAvailabilityFromHtml(normalizedBody, roomInfo);
-          status = fallbackResult.status;
-          if (!indicatorText && fallbackResult.indicator) {
-            indicatorText = fallbackResult.indicator;
+        try {
+          formLocator = await getTrainFormLocator(page, train);
+          if (formLocator) {
+            const innerHtml = await formLocator.innerHTML();
+            if (innerHtml) {
+              normalizedHtmlForTrain = normalizeForSearch(innerHtml);
+            }
           }
+        } catch (error) {
+          console.warn(
+            `フォームの取得に失敗しました (${TRAIN_NAME_MAP[train]}): ${(error as Error).message}`
+          );
         }
 
-        roomStatuses.push({
-          roomType,
-          roomInfo,
-          status,
-          indicatorText
-        });
+        const statuses = await collectRoomStatusesForTrain(
+          page,
+          normalizedHtmlForTrain,
+          settings.roomTypes,
+          train,
+          formLocator ?? undefined
+        );
+        roomStatuses.push(...statuses);
       }
 
       if (roomStatuses.length > 0) {
         console.log('\n空席判定結果:');
-        roomStatuses.forEach(({ roomInfo, status, indicatorText }) => {
-          const statusLabel =
-            status === 'available'
-              ? '○ 空席あり'
-              : status === 'unavailable'
-                ? '× 空席なし'
-                : '- 判定不可';
-          console.log(
-            `  - ${roomInfo.name}: ${statusLabel}` +
-            (indicatorText ? ` (判定根拠: ${indicatorText})` : '')
-          );
-        });
+        for (const train of trainsToCheck) {
+          const statusesForTrain = roomStatuses.filter(status => status.train === train);
+          if (statusesForTrain.length === 0) {
+            continue;
+          }
+
+          console.log(`- ${TRAIN_NAME_MAP[train]}`);
+          statusesForTrain.forEach(({ roomInfo, status, indicatorText }) => {
+            const statusLabel =
+              status === 'available'
+                ? '○ 空席あり'
+                : status === 'unavailable'
+                  ? '× 空席なし'
+                  : '- 判定不可';
+            console.log(
+              `    - ${roomInfo.name}: ${statusLabel}` +
+              (indicatorText ? ` (判定根拠: ${indicatorText})` : '')
+            );
+          });
+        }
       }
 
-      const availableRooms = roomStatuses
-        .filter(({ status }) => status === 'available')
-        .map(({ roomType }) => roomType);
+      const availableEntries = roomStatuses.filter(({ status }) => status === 'available');
+      const availableRooms = Array.from(new Set(availableEntries.map(({ roomType }) => roomType)));
 
-      if (availableRooms.length > 0) {
-        const trains = determineTrainsToSearch(settings.departureStation, settings.arrivalStation);
-        const trainNames = trains.map(t => t === 'seto' ? 'サンライズ瀬戸' : 'サンライズ出雲').join('・');
+      if (availableEntries.length > 0) {
+        const trainNames = trainsToCheck.map(train => TRAIN_NAME_MAP[train]).join('・');
 
         console.log('\n🎉 空席が見つかりました！');
         console.log(`対象列車: ${trainNames}`);
         console.log(`区間: ${settings.departureStation} → ${settings.arrivalStation}`);
         console.log(`日付: ${settings.date}`);
         console.log('空席のある部屋:');
-        availableRooms.forEach(roomType => {
-          const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
-          console.log(`  - ${roomInfo?.name}`);
+        availableEntries.forEach(({ roomInfo, train }) => {
+          const trainName = TRAIN_NAME_MAP[train];
+          console.log(`  - ${roomInfo.name} (${trainName})`);
         });
 
         await browser.close();
