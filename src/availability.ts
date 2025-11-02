@@ -235,11 +235,22 @@ export async function extractAvailabilityFromRow(rowLocator: Locator): Promise<A
   });
 }
 
-async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Promise<AvailabilityResolution> {
+const TRAIN_LABELS: Record<'seto' | 'izumo', string> = {
+  seto: 'サンライズ瀬戸',
+  izumo: 'サンライズ出雲'
+};
+
+const TRAIN_SCOPE_CANDIDATES = ['form', 'section', 'article', 'div', 'table', 'tbody'];
+
+function getTrainLabel(train: 'seto' | 'izumo'): string {
+  return TRAIN_LABELS[train];
+}
+
+async function resolveRoomAvailabilityFromPage(searchRoot: Locator, room: RoomType): Promise<AvailabilityResolution> {
   const formValue = ROOM_TYPE_FORM_VALUES[room.value];
 
   if (formValue) {
-    const radioLocator = page.locator(`input[type="radio"][name="facilitySelect"][value="${formValue}"]`);
+    const radioLocator = searchRoot.locator(`input[type="radio"][name="facilitySelect"][value="${formValue}"]`);
     if ((await radioLocator.count()) > 0) {
       const containerLocator = radioLocator.locator('xpath=ancestor::tr[1]');
       const iconResult = await extractAvailabilityFromRow(containerLocator);
@@ -263,7 +274,7 @@ async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Prom
   const candidates = getRoomKeywordCandidates(room);
   for (const candidate of candidates) {
     if (!candidate.trim()) continue;
-    const rowLocator = page.locator('tr', { hasText: candidate });
+    const rowLocator = searchRoot.locator('tr', { hasText: candidate });
     const rowResult = await extractAvailabilityFromRow(rowLocator);
     if (rowResult.status !== 'unknown') {
       return rowResult;
@@ -273,7 +284,80 @@ async function resolveRoomAvailabilityFromPage(page: Page, room: RoomType): Prom
   return { status: 'unknown' };
 }
 
+async function navigateToTrainPage(page: Page, train: 'seto' | 'izumo'): Promise<void> {
+  const candidateUrls = [
+    `${FORM_URL}?train=${train}`,
+    `${FORM_URL}#${train}`,
+    FORM_URL
+  ];
+
+  let lastError: Error | null = null;
+
+  for (const url of candidateUrls) {
+    try {
+      const response = await page.goto(url, {
+        waitUntil: 'networkidle',
+        timeout: 30000
+      });
+
+      if (!response || response.ok()) {
+        return;
+      }
+    } catch (error) {
+      lastError = error as Error;
+      continue;
+    }
+  }
+
+  if (lastError) {
+    throw lastError;
+  }
+
+  throw new Error('ページの読み込みに失敗しました');
+}
+
+async function getTrainSearchRoot(page: Page, train: 'seto' | 'izumo'): Promise<Locator> {
+  const label = getTrainLabel(train);
+  const otherLabel = getTrainLabel(train === 'seto' ? 'izumo' : 'seto');
+
+  for (const candidate of TRAIN_SCOPE_CANDIDATES) {
+    const scoped = page.locator(`${candidate}:has-text("${label}")`);
+    const count = await scoped.count();
+
+    for (let index = 0; index < count; index++) {
+      const element = scoped.nth(index);
+      try {
+        const textContent = (await element.innerText())?.trim();
+        if (!textContent) {
+          continue;
+        }
+
+        if (!textContent.includes(otherLabel)) {
+          return element;
+        }
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return page.locator('body');
+}
+
+async function getNormalizedSectionHtml(searchRoot: Locator): Promise<string> {
+  try {
+    const html = await searchRoot.innerHTML();
+    if (!html) {
+      return '';
+    }
+    return normalizeForSearch(html);
+  } catch {
+    return '';
+  }
+}
+
 export async function checkAvailability(settings: Settings, maxRetries: number = 3): Promise<AvailabilityCheckResult> {
+  const trains = determineTrainsToSearch(settings.departureStation, settings.arrivalStation);
   let browser: Browser | null = null;
   let lastError: Error | null = null;
 
@@ -283,91 +367,120 @@ export async function checkAvailability(settings: Settings, maxRetries: number =
 
       browser = await chromium.launch({ headless: true });
       const context = await browser.newContext();
-      const page: Page = await context.newPage();
+      const pages = await Promise.all(trains.map(() => context.newPage()));
 
-      await page.goto(FORM_URL, {
-        waitUntil: 'networkidle',
-        timeout: 30000
-      });
+      const trainResults: { train: 'seto' | 'izumo'; roomStatuses: RoomAvailabilityResult[] }[] = [];
 
-      await page.waitForTimeout(2000);
+      for (let index = 0; index < trains.length; index++) {
+        const train = trains[index];
+        const page = pages[index];
+        const trainLabel = getTrainLabel(train);
 
-      const availabilityHtml = await page.content();
+        console.log(`\n▶ ${trainLabel} の空席情報を確認しています...`);
 
-      if (!availabilityHtml) {
-        throw new Error('ページの読み込みに失敗しました');
-      }
+        await navigateToTrainPage(page, train);
+        await page.waitForTimeout(2000);
 
-      const normalizedBody = normalizeForSearch(availabilityHtml);
+        const availabilityHtml = await page.content();
 
-      const roomStatuses: RoomAvailabilityResult[] = [];
-
-      for (const roomType of settings.roomTypes) {
-        const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
-        if (!roomInfo) {
-          console.warn(`未定義の部屋タイプです: ${roomType}`);
-          continue;
+        if (!availabilityHtml) {
+          throw new Error('ページの読み込みに失敗しました');
         }
 
-        const pageResult = await resolveRoomAvailabilityFromPage(page, roomInfo);
-        let status = pageResult.status;
-        let indicatorText = pageResult.indicator;
+        const normalizedBody = normalizeForSearch(availabilityHtml);
+        const searchRoot = await getTrainSearchRoot(page, train);
+        const normalizedSectionHtml = await getNormalizedSectionHtml(searchRoot);
 
-        if (status === 'unknown') {
-          const fallbackResult = resolveRoomAvailabilityFromHtml(normalizedBody, roomInfo);
-          status = fallbackResult.status;
-          if (!indicatorText && fallbackResult.indicator) {
-            indicatorText = fallbackResult.indicator;
+        const roomStatuses: RoomAvailabilityResult[] = [];
+
+        for (const roomType of settings.roomTypes) {
+          const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
+          if (!roomInfo) {
+            console.warn(`未定義の部屋タイプです: ${roomType}`);
+            continue;
           }
+
+          const pageResult = await resolveRoomAvailabilityFromPage(searchRoot, roomInfo);
+          let status = pageResult.status;
+          let indicatorText = pageResult.indicator;
+
+          if (status === 'unknown') {
+            const fallbackSource = normalizedSectionHtml || normalizedBody;
+            const fallbackResult = resolveRoomAvailabilityFromHtml(fallbackSource, roomInfo);
+            status = fallbackResult.status;
+            if (!indicatorText && fallbackResult.indicator) {
+              indicatorText = fallbackResult.indicator;
+            }
+          }
+
+          roomStatuses.push({
+            roomType,
+            roomInfo,
+            status,
+            indicatorText
+          });
         }
 
-        roomStatuses.push({
-          roomType,
-          roomInfo,
-          status,
-          indicatorText
-        });
+        if (roomStatuses.length > 0) {
+          console.log(`\n${trainLabel} の空席判定結果:`);
+          roomStatuses.forEach(({ roomInfo, status, indicatorText }) => {
+            const statusLabel =
+              status === 'available'
+                ? '○ 空席あり'
+                : status === 'unavailable'
+                  ? '× 空席なし'
+                  : '- 判定不可';
+            console.log(
+              `  - ${roomInfo.name}: ${statusLabel}` +
+              (indicatorText ? ` (判定根拠: ${indicatorText})` : '')
+            );
+          });
+        }
+
+        trainResults.push({ train, roomStatuses });
       }
 
-      if (roomStatuses.length > 0) {
-        console.log('\n空席判定結果:');
-        roomStatuses.forEach(({ roomInfo, status, indicatorText }) => {
-          const statusLabel =
-            status === 'available'
-              ? '○ 空席あり'
-              : status === 'unavailable'
-                ? '× 空席なし'
-                : '- 判定不可';
-          console.log(
-            `  - ${roomInfo.name}: ${statusLabel}` +
-            (indicatorText ? ` (判定根拠: ${indicatorText})` : '')
-          );
-        });
-      }
+      const availableEntries = trainResults.flatMap(({ train, roomStatuses }) =>
+        roomStatuses
+          .filter(({ status }) => status === 'available')
+          .map(({ roomType }) => ({ train, roomType }))
+      );
 
-      const availableRooms = roomStatuses
-        .filter(({ status }) => status === 'available')
-        .map(({ roomType }) => roomType);
+      const availableRooms = Array.from(new Set(availableEntries.map(entry => entry.roomType)));
 
-      if (availableRooms.length > 0) {
-        const trains = determineTrainsToSearch(settings.departureStation, settings.arrivalStation);
-        const trainNames = trains.map(t => t === 'seto' ? 'サンライズ瀬戸' : 'サンライズ出雲').join('・');
+      await Promise.all(pages.map(page => page.close().catch(() => {})));
+      await context.close();
 
+      if (availableEntries.length > 0) {
         console.log('\n🎉 空席が見つかりました！');
-        console.log(`対象列車: ${trainNames}`);
         console.log(`区間: ${settings.departureStation} → ${settings.arrivalStation}`);
         console.log(`日付: ${settings.date}`);
-        console.log('空席のある部屋:');
-        availableRooms.forEach(roomType => {
-          const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
-          console.log(`  - ${roomInfo?.name}`);
+
+        const groupedByTrain = new Map<'seto' | 'izumo', string[]>();
+        availableEntries.forEach(({ train, roomType }) => {
+          const list = groupedByTrain.get(train) ?? [];
+          if (!list.includes(roomType)) {
+            list.push(roomType);
+          }
+          groupedByTrain.set(train, list);
         });
 
+        for (const [train, rooms] of groupedByTrain) {
+          const trainLabel = getTrainLabel(train);
+          console.log(`対象列車: ${trainLabel}`);
+          rooms.forEach(roomType => {
+            const roomInfo = ROOM_TYPES.find(r => r.value === roomType);
+            console.log(`  - ${roomInfo?.name}`);
+          });
+        }
+
         await browser.close();
+        browser = null;
         return { hasAvailability: true, availableRooms };
       } else {
         console.log('\n空席なし');
         await browser.close();
+        browser = null;
         return { hasAvailability: false, availableRooms: [] };
       }
 
@@ -378,6 +491,7 @@ export async function checkAvailability(settings: Settings, maxRetries: number =
       if (browser) {
         try {
           await browser.close();
+          browser = null;
         } catch (closeError) {
           console.error('ブラウザのクローズに失敗:', (closeError as Error).message);
         }
